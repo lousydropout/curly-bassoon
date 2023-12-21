@@ -100,11 +100,27 @@ mod betting {
             Ok(self.bet_creation_fee)
         }
 
+        /// Get current block timestamp
+        #[ink(message)]
+        pub fn get_current_block_timestamp(&self) -> Result<u64, Error> {
+            Ok(self.env().block_timestamp())
+        }
+
         /// Convert datetime to milliseconds since Unix epoch
         #[ink(message)]
         pub fn convert_datetime_to_ms(&self, dt: String) -> Result<i64, Error> {
             match dt.as_str().parse::<DateTime<Utc>>() {
                 Ok(y) => Ok(y.timestamp_millis()),
+                Err(_) => Err(Error::NotDatetimeString),
+            }
+        }
+
+        /// Check if current datetime is past specified datetime
+        #[ink(message)]
+        pub fn has_past_datetime(&self, dt: String) -> Result<bool, Error> {
+            let now = self.env().block_timestamp();
+            match dt.as_str().parse::<DateTime<Utc>>() {
+                Ok(y) => Ok(now as i128 > y.timestamp_millis() as i128),
                 Err(_) => Err(Error::NotDatetimeString),
             }
         }
@@ -298,6 +314,55 @@ mod betting {
             ink::env::test::set_caller::<Environment>(caller)
         }
 
+        fn create_sample_bet(
+            betting: &mut Betting,
+            bob: Option<AccountId>,
+            amount_to_wager: Balance,
+            fee: Balance,
+        ) -> u32 {
+            let event_concludes_by = String::from("2023-12-21T00:00:00Z");
+            let criteria_for_winning: String =
+                "Red wins game against blue on December 21st, 2023.".into();
+
+            ink::env::pay_with_call!(
+                betting.create_bet(
+                    amount_to_wager,
+                    bob,
+                    criteria_for_winning.clone(),
+                    event_concludes_by.clone()
+                ),
+                amount_to_wager + 2 * fee
+            )
+            .unwrap()
+            .unwrap()
+        }
+
+        #[cfg(any(feature = "runtime-benchmarks", feature = "std"))]
+        #[ink::test]
+        fn test_helper_function() {
+            let alice = default_accounts().alice;
+            set_next_caller(alice);
+            let betting = Betting::new(alice, 1);
+
+            let dt1 = String::from("2022-01-01T12:34:56Z");
+            let dt2 = String::from("2023-12-22T00:00:00Z");
+
+            // timestamp requires the `Z` at the end to specify UTC timezone
+            assert_eq!(
+                betting.has_past_datetime("2023-12-22T00:00:00".into()),
+                Err(Error::NotDatetimeString)
+            );
+            assert_eq!(
+                betting.convert_datetime_to_ms(dt1.clone()),
+                Ok(1_641_040_496_000)
+            );
+
+            assert_eq!(
+                betting.convert_datetime_to_ms(dt2.clone()),
+                Ok(1_703_203_200_000)
+            );
+        }
+
         #[ink::test]
         fn register_alice() {
             let alice = default_accounts().alice;
@@ -390,29 +455,6 @@ mod betting {
                 amount_wagered, amount_to_wager,
                 "Actual amount: {amount_wagered}"
             );
-        }
-
-        fn create_sample_bet(
-            betting: &mut Betting,
-            bob: Option<AccountId>,
-            amount_to_wager: Balance,
-            fee: Balance,
-        ) -> u32 {
-            let event_concludes_by = String::from("2023-12-21T00:00:00Z");
-            let criteria_for_winning: String =
-                "Red wins game against blue on December 21st, 2023.".into();
-
-            ink::env::pay_with_call!(
-                betting.create_bet(
-                    amount_to_wager,
-                    bob,
-                    criteria_for_winning.clone(),
-                    event_concludes_by.clone()
-                ),
-                amount_to_wager + 2 * fee
-            )
-            .unwrap()
-            .unwrap()
         }
 
         #[ink::test]
