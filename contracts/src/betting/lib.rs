@@ -19,7 +19,9 @@ mod betting {
         /// The String is not in a parseable datetime format
         NotDatetimeString,
         /// Not enough was sent
-        IssufficientAmountOfTokensSent,
+        InssufficientAmountOfTokensSent,
+        /// Cannot reject bet if account id does not correspond to bettor 2's
+        NotBettor2,
     }
 
     /// Different states that a bet can be in
@@ -119,7 +121,7 @@ mod betting {
             event_decided_by: String,
         ) -> Result<Option<u32>, Error> {
             if self.env().transferred_value() < self.bet_creation_fee + amount_to_wager {
-                return Err(Error::IssufficientAmountOfTokensSent);
+                return Err(Error::InssufficientAmountOfTokensSent);
             }
             if event_decided_by.as_str().parse::<DateTime<Utc>>().is_err() {
                 return Err(Error::NotDatetimeString);
@@ -139,6 +141,66 @@ mod betting {
 
             self.bets.push(bet);
             Ok(Some(bet_number))
+        }
+
+        #[ink(message, payable)]
+        pub fn reject_bet(&mut self, n: u32) -> Result<bool, Error> {
+            let caller = self.env().caller();
+
+            match self.bets.get_mut(n as usize) {
+                Some(x) => match x.bettor_2 {
+                    Some(bettor) => {
+                        if bettor == caller {
+                            x.state = BetState::BetRefusedByBettor2;
+                        } else {
+                            return Err(Error::NotBettor2);
+                        }
+                        Ok(true)
+                    }
+                    None => Err(Error::NotBettor2),
+                },
+                None => Err(Error::BetDoesNotExist),
+            }
+        }
+
+        #[ink(message, payable)]
+        pub fn get_amount_transferred(&mut self) -> Result<Balance, ()> {
+            Ok(self.env().transferred_value())
+        }
+
+        #[ink(message, payable)]
+        pub fn accept_bet(&mut self, n: u32) -> Result<bool, Error> {
+            let caller = self.env().caller();
+            let transferred_amount = self.env().transferred_value();
+
+            match self.bets.get_mut(n as usize) {
+                Some(x) => {
+                    // make sure bettor2 candidate sent enough tokens
+                    if transferred_amount < x.amount_wagered {
+                        return Err(Error::InssufficientAmountOfTokensSent);
+                    }
+
+                    // allow caller to accept bet if either
+                    //   1. bettor2 has not been assigned by bettor1 or
+                    //   2. bettor2 has been assigned by bettor1 and is caller
+                    match x.bettor_2 {
+                        Some(bettor) => {
+                            if bettor == caller {
+                                x.state = BetState::BetAcceptedByBettor2;
+                            } else {
+                                return Err(Error::NotBettor2);
+                            }
+                            Ok(true)
+                        }
+                        None => {
+                            x.state = BetState::BetAcceptedByBettor2;
+                            x.bettor_2 = Some(caller);
+                            Ok(true)
+                        }
+                    }
+                }
+                None => Err(Error::BetDoesNotExist),
+            }
         }
 
         /// Get amount wagered
@@ -327,6 +389,119 @@ mod betting {
             assert_eq!(
                 amount_wagered, amount_to_wager,
                 "Acutal amount: {amount_wagered}"
+            );
+        }
+
+        fn create_sample_bet(
+            betting: &mut Betting,
+            bob: Option<AccountId>,
+            amount_to_wager: Balance,
+            fee: Balance,
+        ) -> u32 {
+            let event_concludes_by = String::from("2023-12-21T00:00:00Z");
+            let criteria_for_winning: String =
+                "Red wins game against blue on December 21st, 2023.".into();
+
+            ink::env::pay_with_call!(
+                betting.create_bet(
+                    amount_to_wager,
+                    bob,
+                    criteria_for_winning.clone(),
+                    event_concludes_by.clone()
+                ),
+                amount_to_wager + 2 * fee
+            )
+            .unwrap()
+            .unwrap()
+        }
+
+        #[ink::test]
+        fn create_and_accept_bet_when_bettor2_is_assgined() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+            let charlie = default_accounts().charlie;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // Charlie should not be able to accept or reject the bet from Alice
+            set_next_caller(charlie);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), 0),
+                Err(Error::InssufficientAmountOfTokensSent)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Err(Error::NotBettor2)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.reject_bet(bet_number), 0),
+                Err(Error::NotBettor2)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.reject_bet(bet_number), amount_to_wager),
+                Err(Error::NotBettor2)
+            );
+
+            // Bob should be able to accept if he sent sufficient coins
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), 0),
+                Err(Error::InssufficientAmountOfTokensSent)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+        }
+
+        #[ink::test]
+        fn create_and_reject_bet_when_bettor2_is_assgined() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+            let charlie = default_accounts().charlie;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // Charlie should not be able to accept or reject the bet from Alice
+            set_next_caller(charlie);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), 0),
+                Err(Error::InssufficientAmountOfTokensSent)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Err(Error::NotBettor2)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.reject_bet(bet_number), 0),
+                Err(Error::NotBettor2)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.reject_bet(bet_number), amount_to_wager),
+                Err(Error::NotBettor2)
+            );
+
+            // Bob should be able to accept if he sent sufficient coins
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), 0),
+                Err(Error::InssufficientAmountOfTokensSent)
+            );
+            assert_eq!(
+                ink::env::pay_with_call!(betting.reject_bet(bet_number), 0),
+                Ok(true)
             );
         }
     }
