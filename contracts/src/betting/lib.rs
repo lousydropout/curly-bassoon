@@ -4,28 +4,48 @@
 mod betting {
     use ink::storage::Mapping;
 
-    #[ink(storage)]
-    pub struct Bettor {
-        reviewers: Mapping<AccountId, ()>,
+    #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
+    pub enum Error {
+        // Caller is not a final decision maker
+        NotFinalDecisionMaker,
     }
 
-    impl Bettor {
+    #[ink(storage)]
+    pub struct Betting {
+        reviewers: Mapping<AccountId, ()>,
+        number_of_reviewers: u32,
+        final_decision_maker: AccountId,
+    }
+
+    impl Betting {
         #[ink(constructor)]
-        pub fn default() -> Self {
+        pub fn new(final_decision_maker: AccountId) -> Self {
             Self {
                 reviewers: Mapping::default(),
+                number_of_reviewers: 0,
+                final_decision_maker,
             }
         }
 
+        // --------------------------------------------------------
+        // Reputation-related functions
+        // --------------------------------------------------------
         #[ink(message)]
         pub fn register_as_reviewer(&mut self) -> Result<(), ()> {
             self.reviewers.insert(self.env().caller(), &());
+            self.number_of_reviewers += 1;
             Ok(())
         }
 
         #[ink(message)]
         pub fn is_registered_as_reviewer(&self) -> Result<bool, ()> {
             Ok(self.reviewers.contains(self.env().caller()))
+        }
+
+        #[ink(message)]
+        pub fn is_final_decision_maker(&self) -> Result<bool, ()> {
+            Ok(self.final_decision_maker == self.env().caller())
         }
     }
 
@@ -43,25 +63,40 @@ mod betting {
 
         #[ink::test]
         fn register_alice() {
-            set_next_caller(default_accounts().alice);
-            let mut bettor = Bettor::default();
+            let alice = default_accounts().alice;
+            set_next_caller(alice);
+            let mut betting = Betting::new(alice);
 
             // not registered yet
             assert_eq!(
-                bettor.is_registered_as_reviewer(),
+                betting.is_registered_as_reviewer(),
                 Ok(false),
                 "Alice was already registered"
             );
 
-            let register = bettor.register_as_reviewer();
+            assert_eq!(
+                betting.number_of_reviewers, 0,
+                "Smart contract was initialized with at least 1 reviewer."
+            );
+
+            // but is final decision maker
+            assert_eq!(
+                betting.is_final_decision_maker(),
+                Ok(true),
+                "Alice is not the final decision maker"
+            );
+
+            let register = betting.register_as_reviewer();
             assert!(register.is_ok(), "Unable to register Alice.");
 
             // registered
             assert_eq!(
-                bettor.is_registered_as_reviewer(),
+                betting.is_registered_as_reviewer(),
                 Ok(true),
                 "Alice is not registered"
             );
+
+            assert_eq!(betting.number_of_reviewers, 1, "Wrong number of reviewers.");
         }
     }
 }
