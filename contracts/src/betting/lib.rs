@@ -4,7 +4,6 @@
 mod betting {
     use ink::prelude::{string::String, vec::Vec};
     use ink::storage::Mapping;
-    const NUM_DECIMALS: u32 = 12;
 
     #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
     #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
@@ -124,6 +123,12 @@ mod betting {
         pub fn is_final_decision_maker(&self) -> Result<bool, ()> {
             Ok(self.final_decision_maker == self.env().caller())
         }
+
+        /// Get balance
+        #[ink(message)]
+        pub fn balance(&self) -> Result<Balance, ()> {
+            Ok(self.env().balance())
+        }
     }
 
     #[cfg(test)]
@@ -194,14 +199,18 @@ mod betting {
             let event_concludes_by = iso8601_to_timestamp_millis("2023-12-21T00:00:00Z").unwrap();
 
             set_next_caller(alice);
-            let mut betting = Betting::new(alice, 1_u128.pow(10));
 
-            let criteria_for_winning =
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+            assert!(betting.balance().unwrap() == 1_000_000); // alice has 1 million to begin with
+
+            let criteria_for_winning: Option<String> =
                 Some("Red wins game against blue on December 21st, 2023.".into());
 
+            let amount_sent = 10 * fee;
             let bet_number = ink::env::pay_with_call!(
                 betting.create_bet(Some(bob), criteria_for_winning.clone(), event_concludes_by),
-                100
+                amount_sent
             )
             .unwrap()
             .unwrap();
@@ -213,6 +222,12 @@ mod betting {
             assert_eq!(bet.criteria_for_winning, criteria_for_winning);
             assert_eq!(bet.event_decided_by, event_concludes_by);
             assert_eq!(bet.state, Some(BetState::Created));
+            let amount_wagered = bet.amount_wagered;
+            assert_eq!(
+                amount_wagered,
+                amount_sent - fee,
+                "Acutal amount: {amount_wagered}"
+            );
         }
     }
 }
