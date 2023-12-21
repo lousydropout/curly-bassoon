@@ -2,7 +2,6 @@
 
 #[ink::contract]
 mod betting {
-    use ink::prelude::string::String;
     use ink::storage::Mapping;
 
     #[ink(storage)]
@@ -48,12 +47,21 @@ mod betting {
             let mut bettor = Bettor::default();
 
             // not registered yet
-            assert_eq!(bettor.is_registered_as_reviewer(), Ok(false));
+            assert_eq!(
+                bettor.is_registered_as_reviewer(),
+                Ok(false),
+                "Alice was already registered"
+            );
 
-            _ = bettor.register_as_reviewer();
+            let register = bettor.register_as_reviewer();
+            assert!(register.is_ok(), "Unable to register Alice.");
 
             // registered
-            assert_eq!(bettor.is_registered_as_reviewer(), Ok(true));
+            assert_eq!(
+                bettor.is_registered_as_reviewer(),
+                Ok(true),
+                "Alice is not registered"
+            );
         }
     }
 }
