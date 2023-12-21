@@ -493,7 +493,7 @@ mod betting {
                 Err(Error::NotBettor2)
             );
 
-            // Bob should be able to accept if he sent sufficient coins
+            // Bob should be able to reject even if he sent zero coin
             set_next_caller(bob);
             assert_eq!(
                 ink::env::pay_with_call!(betting.accept_bet(bet_number), 0),
