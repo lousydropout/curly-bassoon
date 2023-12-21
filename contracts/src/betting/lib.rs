@@ -13,13 +13,19 @@ mod betting {
         NotFinalDecisionMaker,
     }
 
+    /// Information regarding a particular bet
     #[derive(Debug, Default, PartialEq, Eq, scale::Encode, scale::Decode)]
     #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
     pub struct Bet {
+        /// How much is wagered on the event's outcome
         amount_wagered: Balance,
+        /// Who is bettor 1?
         bettor_1: Option<AccountId>,
+        /// Who is bettor 2?
         bettor_2: Option<AccountId>,
+        /// How is the winner decided?
         criteria_for_winning: Option<String>,
+        /// When will the event conclude by (in unix timestamp, milliseconds)
         event_decided_by: u64,
     }
 
@@ -64,6 +70,7 @@ mod betting {
             if self.env().transferred_value() < self.bet_creation_fee {
                 return Err(());
             }
+            // The amount wagered is calculated based on how much the user sent
             let amount_wagered = self.env().transferred_value() - self.bet_creation_fee;
 
             let bet = Bet {
