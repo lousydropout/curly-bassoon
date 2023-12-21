@@ -3,30 +3,30 @@
 #[ink::contract]
 mod betting {
     use ink::prelude::string::String;
+    use ink::storage::Mapping;
 
     #[ink(storage)]
-    pub struct Greeter {
-        message: String,
+    pub struct Bettor {
+        reviewers: Mapping<AccountId, ()>,
     }
 
-    impl Greeter {
-        #[ink(constructor)]
-        pub fn new() -> Self {
-            Self {
-                message: "hi".into(),
-            }
-        }
-
+    impl Bettor {
         #[ink(constructor)]
         pub fn default() -> Self {
             Self {
-                message: "hi".into(),
+                reviewers: Mapping::default(),
             }
         }
 
         #[ink(message)]
-        pub fn get_message(&self) -> Result<String, ()> {
-            return Ok("hi".into());
+        pub fn register_as_reviewer(&mut self) -> Result<(), ()> {
+            self.reviewers.insert(self.env().caller(), &());
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn is_registered_as_reviewer(&self) -> Result<bool, ()> {
+            Ok(self.reviewers.contains(self.env().caller()))
         }
     }
 
@@ -34,10 +34,26 @@ mod betting {
     mod tests {
         use super::*;
 
+        fn default_accounts() -> ink::env::test::DefaultAccounts<ink::env::DefaultEnvironment> {
+            ink::env::test::default_accounts::<Environment>()
+        }
+
+        fn set_next_caller(caller: AccountId) {
+            ink::env::test::set_caller::<Environment>(caller)
+        }
+
         #[ink::test]
-        fn new_works() {
-            let x = Greeter::new();
-            assert_eq!(x.get_message().unwrap(), String::from("hi"));
+        fn register_alice() {
+            set_next_caller(default_accounts().alice);
+            let mut bettor = Bettor::default();
+
+            // not registered yet
+            assert_eq!(bettor.is_registered_as_reviewer(), Ok(false));
+
+            _ = bettor.register_as_reviewer();
+
+            // registered
+            assert_eq!(bettor.is_registered_as_reviewer(), Ok(true));
         }
     }
 }
