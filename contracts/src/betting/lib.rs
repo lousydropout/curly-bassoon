@@ -13,6 +13,19 @@ mod betting {
         NotFinalDecisionMaker,
     }
 
+    /// Different states that a bet can be in
+    #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
+    pub enum BetState {
+        Created,
+        BetAcceptedByBettor2,
+        BetRefusedByBettor2,
+        EventConcluded,
+        Bettor1Wins,
+        Bettor2Wins,
+        BettorsDisagree,
+    }
+
     /// Information regarding a particular bet
     #[derive(Debug, Default, PartialEq, Eq, scale::Encode, scale::Decode)]
     #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
@@ -26,7 +39,9 @@ mod betting {
         /// How is the winner decided?
         criteria_for_winning: Option<String>,
         /// When will the event conclude by (in unix timestamp, milliseconds)
-        event_decided_by: u64,
+        event_decided_by: u128,
+        ///
+        state: Option<BetState>,
     }
 
     #[ink(storage)]
@@ -65,7 +80,7 @@ mod betting {
             &mut self,
             bettor_2: Option<AccountId>,
             criteria_for_winning: Option<String>,
-            event_decided_by: u64,
+            event_decided_by: u128,
         ) -> Result<Option<u32>, ()> {
             if self.env().transferred_value() < self.bet_creation_fee {
                 return Err(());
@@ -79,6 +94,7 @@ mod betting {
                 bettor_2,
                 criteria_for_winning,
                 event_decided_by,
+                state: Some(BetState::Created),
             };
 
             // update latest bet number
@@ -113,6 +129,17 @@ mod betting {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use chrono::DateTime;
+
+        fn iso8601_to_timestamp_millis(iso8601_string: &str) -> Option<u128> {
+            match DateTime::parse_from_rfc3339(iso8601_string) {
+                Ok(parsed_time) => {
+                    let duration = parsed_time.timestamp_millis();
+                    Some(duration as u128)
+                }
+                Err(_) => None,
+            }
+        }
 
         fn default_accounts() -> ink::env::test::DefaultAccounts<ink::env::DefaultEnvironment> {
             ink::env::test::default_accounts::<Environment>()
@@ -126,7 +153,7 @@ mod betting {
         fn register_alice() {
             let alice = default_accounts().alice;
             set_next_caller(alice);
-            let mut betting = Betting::new(alice, 10_u128.pow(NUM_DECIMALS));
+            let mut betting = Betting::new(alice, 1_u128.pow(10));
 
             // not registered yet
             assert_eq!(
@@ -158,6 +185,34 @@ mod betting {
             );
 
             assert_eq!(betting.number_of_reviewers, 1, "Wrong number of reviewers.");
+        }
+
+        #[ink::test]
+        fn create_bet() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+            let event_concludes_by = iso8601_to_timestamp_millis("2023-12-21T00:00:00Z").unwrap();
+
+            set_next_caller(alice);
+            let mut betting = Betting::new(alice, 1_u128.pow(10));
+
+            let criteria_for_winning =
+                Some("Red wins game against blue on December 21st, 2023.".into());
+
+            let bet_number = ink::env::pay_with_call!(
+                betting.create_bet(Some(bob), criteria_for_winning.clone(), event_concludes_by),
+                100
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(bet_number, 0);
+
+            let bet = betting.bets.get(bet_number as usize).unwrap();
+            assert_eq!(bet.bettor_1.unwrap(), alice);
+            assert_eq!(bet.bettor_2.unwrap(), bob);
+            assert_eq!(bet.criteria_for_winning, criteria_for_winning);
+            assert_eq!(bet.event_decided_by, event_concludes_by);
+            assert_eq!(bet.state, Some(BetState::Created));
         }
     }
 }
