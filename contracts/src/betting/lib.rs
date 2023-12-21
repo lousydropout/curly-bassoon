@@ -388,7 +388,7 @@ mod betting {
             let amount_wagered = betting.get_amount_wagered(bet_number).unwrap();
             assert_eq!(
                 amount_wagered, amount_to_wager,
-                "Acutal amount: {amount_wagered}"
+                "Actual amount: {amount_wagered}"
             );
         }
 
