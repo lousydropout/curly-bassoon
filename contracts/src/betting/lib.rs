@@ -4,6 +4,7 @@
 mod betting {
     use chrono::{DateTime, Utc};
 
+    use ink::env::hash;
     use ink::prelude::{string::String, vec::Vec};
     use ink::storage::Mapping;
 
@@ -22,6 +23,9 @@ mod betting {
         InssufficientAmountOfTokensSent,
         /// Cannot reject bet if account id does not correspond to bettor 2's
         NotBettor2,
+        /// The caller is not a valid party to the bet
+        CallerNotValidBettor,
+        InvalidStateForCallingFunction,
     }
 
     /// Different states that a bet can be in
@@ -32,9 +36,23 @@ mod betting {
         BetAcceptedByBettor2,
         BetRefusedByBettor2,
         EventConcluded,
+        Bettor1Voted,
+        Bettor2Voted,
         Bettor1Wins,
         Bettor2Wins,
+        BettorsDrew,
         BettorsDisagree,
+    }
+
+    /// Different states that a bet's outcome can be in
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(::scale_info::TypeInfo))]
+    pub enum BetOutcome {
+        Draw,
+        Bettor1Wins,
+        Bettor2Wins,
+        /// Undecideable could be because the terms turned out not to be sufficiently clear
+        Undecideable,
     }
 
     /// Information regarding a particular bet
@@ -51,6 +69,14 @@ mod betting {
         criteria_for_winning: String,
         /// When will the event conclude by (in unix timestamp, milliseconds)
         event_decided_by: String,
+        ///
+        outcome_claimed_by_bettor_1: Option<BetOutcome>,
+        ///
+        outcome_claimed_by_bettor_2: Option<BetOutcome>,
+        ///
+        reviewer: Option<AccountId>,
+        ///
+        outcome_claimed_by_reviewer: Option<BetOutcome>,
         ///
         state: BetState,
     }
@@ -69,6 +95,7 @@ mod betting {
         latest_bet: u32,
         /// A vector of bet information
         bets: Vec<Bet>,
+        salt: u128,
     }
 
     impl Betting {
@@ -81,12 +108,27 @@ mod betting {
                 final_decision_maker,
                 latest_bet: 0,
                 bets: Vec::default(),
+                salt: u128::default(),
             }
         }
 
         // --------------------------------------------------------
         // Helper functions
         // --------------------------------------------------------
+        /// A pseudo-random number generator made to go from 0 to `max_value`.
+        /// Taken from https://docs.astar.network/docs/build/builder-guides/xvm_wasm/pseudo_random/
+        #[ink(message)]
+        pub fn get_pseudo_random(&mut self, max_value: u8) -> u8 {
+            let seed = self.env().block_timestamp();
+            let mut input: Vec<u8> = Vec::new();
+            input.extend_from_slice(&seed.to_be_bytes());
+            input.extend_from_slice(&self.salt.to_be_bytes());
+            let mut output = <hash::Keccak256 as hash::HashOutput>::Type::default();
+            ink::env::hash_bytes::<hash::Keccak256>(&input, &mut output);
+            self.salt += 1;
+            let number = output[0] % (max_value + 1);
+            number
+        }
 
         /// Get contract balance
         #[ink(message)]
@@ -150,6 +192,10 @@ mod betting {
                 criteria_for_winning,
                 event_decided_by,
                 state: BetState::Created,
+                outcome_claimed_by_bettor_1: None,
+                outcome_claimed_by_bettor_2: None,
+                reviewer: None,
+                outcome_claimed_by_reviewer: None,
             };
             // update latest bet number
             let bet_number = self.latest_bet;
@@ -217,6 +263,80 @@ mod betting {
                 }
                 None => Err(Error::BetDoesNotExist),
             }
+        }
+
+        /// (For bettors): Submit event's outcome.
+        ///   winner = 0 (draw), 1 (bettor1 wins), or 2 (bettor2 wins)
+        #[ink(message)]
+        pub fn submit_outcome(&mut self, n: u32, winner: u8) -> Result<(), Error> {
+            let caller = self.env().caller();
+            let mut bet;
+            match self.bets.get_mut(n as usize) {
+                Some(y) => bet = y,
+                None => {
+                    return Err(Error::BetDoesNotExist);
+                }
+            }
+
+            // figure out what state `winner` corresponds to
+            let outcome = match winner {
+                0 => BetOutcome::Draw,
+                1 => BetOutcome::Bettor1Wins,
+                2 => BetOutcome::Bettor2Wins,
+                _ => BetOutcome::Undecideable,
+            };
+
+            // check if caller is bettor 1
+            if bet.bettor_1.unwrap() == caller {
+                // update state
+                if bet.state == BetState::Bettor2Voted {
+                    bet.state = match (outcome, bet.outcome_claimed_by_bettor_2.unwrap()) {
+                        (BetOutcome::Draw, BetOutcome::Draw) => BetState::BettorsDrew,
+                        (BetOutcome::Undecideable, BetOutcome::Undecideable) => {
+                            BetState::BettorsDrew
+                        }
+                        (BetOutcome::Bettor1Wins, BetOutcome::Bettor1Wins) => BetState::Bettor1Wins,
+                        (BetOutcome::Bettor2Wins, BetOutcome::Bettor2Wins) => BetState::Bettor2Wins,
+                        _ => BetState::BettorsDisagree,
+                    }
+                } else if bet.state == BetState::EventConcluded {
+                    bet.state = BetState::Bettor1Voted;
+                } else {
+                    return Err(Error::InvalidStateForCallingFunction);
+                }
+
+                return Ok(());
+            }
+
+            // check if caller is bettor 2
+            match bet.bettor_2 {
+                Some(bettor_2) if bettor_2 == caller => {
+                    // update state
+                    if bet.state == BetState::Bettor1Voted {
+                        bet.state = match (bet.outcome_claimed_by_bettor_1.unwrap(), outcome) {
+                            (BetOutcome::Draw, BetOutcome::Draw) => BetState::BettorsDrew,
+                            (BetOutcome::Undecideable, BetOutcome::Undecideable) => {
+                                BetState::BettorsDrew
+                            }
+                            (BetOutcome::Bettor1Wins, BetOutcome::Bettor1Wins) => {
+                                BetState::Bettor1Wins
+                            }
+                            (BetOutcome::Bettor2Wins, BetOutcome::Bettor2Wins) => {
+                                BetState::Bettor2Wins
+                            }
+                            _ => BetState::BettorsDisagree,
+                        }
+                    } else if bet.state == BetState::EventConcluded {
+                        bet.state = BetState::Bettor2Voted;
+                    } else {
+                        return Err(Error::InvalidStateForCallingFunction);
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+
+            Err(Error::CallerNotValidBettor)
         }
 
         /// Get amount wagered
