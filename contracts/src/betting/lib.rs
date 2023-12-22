@@ -35,13 +35,15 @@ mod betting {
         Created,
         BetAcceptedByBettor2,
         BetRefusedByBettor2,
-        EventConcluded,
         Bettor1Voted,
         Bettor2Voted,
         Bettor1Wins,
         Bettor2Wins,
         BettorsDrew,
         BettorsDisagree,
+        YetToPayBettor1,
+        YetToPayBettor2,
+        Concluded,
     }
 
     /// Different states that a bet's outcome can be in
@@ -267,10 +269,10 @@ mod betting {
 
         /// (For bettors): Submit event's outcome.
         ///   winner = 0 (draw), 1 (bettor1 wins), or 2 (bettor2 wins)
-        #[ink(message)]
+        #[ink(message, payable)]
         pub fn submit_outcome(&mut self, n: u32, winner: u8) -> Result<(), Error> {
             let caller = self.env().caller();
-            let mut bet;
+            let bet;
             match self.bets.get_mut(n as usize) {
                 Some(y) => bet = y,
                 None => {
@@ -299,7 +301,8 @@ mod betting {
                         (BetOutcome::Bettor2Wins, BetOutcome::Bettor2Wins) => BetState::Bettor2Wins,
                         _ => BetState::BettorsDisagree,
                     }
-                } else if bet.state == BetState::EventConcluded {
+                } else if bet.state == BetState::BetAcceptedByBettor2 {
+                    bet.outcome_claimed_by_bettor_1 = Some(outcome);
                     bet.state = BetState::Bettor1Voted;
                 } else {
                     return Err(Error::InvalidStateForCallingFunction);
@@ -326,7 +329,8 @@ mod betting {
                             }
                             _ => BetState::BettorsDisagree,
                         }
-                    } else if bet.state == BetState::EventConcluded {
+                    } else if bet.state == BetState::BetAcceptedByBettor2 {
+                        bet.outcome_claimed_by_bettor_2 = Some(outcome);
                         bet.state = BetState::Bettor2Voted;
                     } else {
                         return Err(Error::InvalidStateForCallingFunction);
@@ -337,6 +341,81 @@ mod betting {
             }
 
             Err(Error::CallerNotValidBettor)
+        }
+
+        #[ink(message, payable)]
+        pub fn withdraw_winnings(&mut self, n: u32) -> Result<bool, Error> {
+            // update bet's state to "concluded"
+            let x = self.bets.get(n as usize);
+            if x.is_none() {
+                return Err(Error::BetDoesNotExist);
+            }
+
+            // pay winnings
+            let mut concluded = true;
+            let mut yet_to_pay_1 = false;
+            let mut yet_to_pay_2 = false;
+            match x {
+                None => {}
+                Some(bet) => {
+                    // if bettors agree on outcome, send money to correct better(s)
+                    match bet.state {
+                        BetState::Bettor1Wins | BetState::YetToPayBettor1 => {
+                            concluded = self
+                                .env()
+                                .transfer(bet.bettor_1.unwrap(), 2 * bet.amount_wagered)
+                                .is_err();
+                        }
+                        BetState::Bettor2Wins | BetState::YetToPayBettor2 => {
+                            concluded = self
+                                .env()
+                                .transfer(bet.bettor_2.unwrap(), 2 * bet.amount_wagered)
+                                .is_err();
+                        }
+                        BetState::BettorsDrew => {
+                            if self
+                                .env()
+                                .transfer(bet.bettor_1.unwrap(), bet.amount_wagered)
+                                .is_err()
+                            {
+                                yet_to_pay_1 = true;
+                                concluded = false;
+                            }
+                            if self
+                                .env()
+                                .transfer(bet.bettor_2.unwrap(), bet.amount_wagered)
+                                .is_err()
+                            {
+                                yet_to_pay_2 = true;
+                                concluded = false;
+                            }
+                        }
+                        BetState::BettorsDisagree => {}
+                        _ => {}
+                    }
+                }
+            }
+
+            let bet = self.bets.get_mut(n as usize).unwrap();
+            match concluded {
+                true => {
+                    bet.state = BetState::Concluded;
+                }
+                false => {
+                    if bet.state == BetState::BettorsDrew {
+                        if yet_to_pay_1 && yet_to_pay_2 {
+                            ();
+                        } else if yet_to_pay_1 {
+                            bet.state = BetState::YetToPayBettor1
+                        } else if yet_to_pay_2 {
+                            bet.state = BetState::YetToPayBettor2
+                        }
+                    }
+                    // else, do nothing
+                }
+            }
+
+            Ok(concluded)
         }
 
         /// Get amount wagered
@@ -664,6 +743,222 @@ mod betting {
             assert_eq!(
                 ink::env::pay_with_call!(betting.reject_bet(bet_number), 0),
                 Ok(true)
+            );
+        }
+
+        #[ink::test]
+        fn bettors_agree_on_outcome_alice_wins() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+
+            // alice creates bet
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // bob accepts bet
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+
+            // Event ends: Alice wins!
+            set_next_caller(alice);
+            assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(bob);
+            assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Bettor1Wins));
+        }
+
+        #[ink::test]
+        fn bettors_agree_on_outcome_bob_wins() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+
+            // alice creates bet
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // bob accepts bet
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+
+            // Event ends: Alice wins!
+            set_next_caller(alice);
+            assert_eq!(betting.submit_outcome(bet_number, 2).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(bob);
+            assert_eq!(betting.submit_outcome(bet_number, 2).is_ok(), true);
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Bettor2Wins));
+        }
+
+        #[ink::test]
+        fn bettors_agree_on_outcome_draw() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+
+            // alice creates bet
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // bob accepts bet
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+
+            // Event ends: Alice wins!
+            set_next_caller(alice);
+            assert_eq!(betting.submit_outcome(bet_number, 0).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(bob);
+            assert_eq!(betting.submit_outcome(bet_number, 0).is_ok(), true);
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::BettorsDrew));
+        }
+
+        #[ink::test]
+        fn bettors_agree_on_outcome_undecideable() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+
+            // alice creates bet
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // bob accepts bet
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+
+            // Event ends: Alice wins!
+            set_next_caller(alice);
+            assert_eq!(betting.submit_outcome(bet_number, 3).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(bob);
+            assert_eq!(betting.submit_outcome(bet_number, 3).is_ok(), true);
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::BettorsDrew));
+        }
+
+        #[ink::test]
+        fn bettors_disagree_on_outcome_voted_for_self() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+
+            // alice creates bet
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // bob accepts bet
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+
+            // Event ends: Alice wins!
+            set_next_caller(alice);
+            assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(bob);
+            assert_eq!(betting.submit_outcome(bet_number, 2).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::BettorsDisagree)
+            );
+        }
+
+        #[ink::test]
+        fn bettors_disagree_on_outcome_alice_voted_for_self_bob_drew() {
+            let alice = default_accounts().alice;
+            let bob = default_accounts().bob;
+
+            set_next_caller(alice);
+            let amount_to_wager = 100;
+            let fee: Balance = 10;
+            let mut betting = Betting::new(alice, fee);
+
+            // alice creates bet
+            let bet_number = create_sample_bet(&mut betting, Some(bob), amount_to_wager, fee);
+
+            assert_eq!(betting.get_amount_wagered(bet_number), Ok(amount_to_wager));
+
+            // bob accepts bet
+            set_next_caller(bob);
+            assert_eq!(
+                ink::env::pay_with_call!(betting.accept_bet(bet_number), amount_to_wager),
+                Ok(true)
+            );
+
+            // Event ends: Alice wins!
+            set_next_caller(alice);
+            assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(bob);
+            assert_eq!(betting.submit_outcome(bet_number, 0).is_ok(), true);
+            assert_eq!(
+                betting.get_bet_state(bet_number),
+                Ok(BetState::BettorsDisagree)
             );
         }
     }
