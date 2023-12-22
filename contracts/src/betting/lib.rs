@@ -26,6 +26,7 @@ mod betting {
         /// The caller is not a valid party to the bet
         CallerNotValidBettor,
         InvalidStateForCallingFunction,
+        AlreadyWithdrewWinnings,
     }
 
     /// Different states that a bet can be in
@@ -364,13 +365,13 @@ mod betting {
                             concluded = self
                                 .env()
                                 .transfer(bet.bettor_1.unwrap(), 2 * bet.amount_wagered)
-                                .is_err();
+                                .is_ok();
                         }
                         BetState::Bettor2Wins | BetState::YetToPayBettor2 => {
                             concluded = self
                                 .env()
                                 .transfer(bet.bettor_2.unwrap(), 2 * bet.amount_wagered)
-                                .is_err();
+                                .is_ok();
                         }
                         BetState::BettorsDrew => {
                             if self
@@ -391,6 +392,7 @@ mod betting {
                             }
                         }
                         BetState::BettorsDisagree => {}
+                        BetState::Concluded => return Err(Error::AlreadyWithdrewWinnings),
                         _ => {}
                     }
                 }
@@ -779,6 +781,15 @@ mod betting {
             set_next_caller(bob);
             assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
             assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Bettor1Wins));
+
+            set_next_caller(alice);
+            assert_eq!(betting.withdraw_winnings(bet_number), Ok(true));
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Concluded));
+            // Cannot withdraw winnings a 2nd time
+            assert_eq!(
+                betting.withdraw_winnings(bet_number),
+                Err(Error::AlreadyWithdrewWinnings)
+            );
         }
 
         #[ink::test]
@@ -803,7 +814,7 @@ mod betting {
                 Ok(true)
             );
 
-            // Event ends: Alice wins!
+            // Event ends: Bob wins!
             set_next_caller(alice);
             assert_eq!(betting.submit_outcome(bet_number, 2).is_ok(), true);
             assert_eq!(
@@ -814,6 +825,15 @@ mod betting {
             set_next_caller(bob);
             assert_eq!(betting.submit_outcome(bet_number, 2).is_ok(), true);
             assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Bettor2Wins));
+
+            // bob withdraws winnings
+            assert_eq!(betting.withdraw_winnings(bet_number), Ok(true));
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Concluded));
+            // Cannot withdraw winnings a 2nd time
+            assert_eq!(
+                betting.withdraw_winnings(bet_number),
+                Err(Error::AlreadyWithdrewWinnings)
+            );
         }
 
         #[ink::test]
@@ -838,12 +858,21 @@ mod betting {
                 Ok(true)
             );
 
-            // Event ends: Alice wins!
+            // Event ends: Alice and Bob draws!
             set_next_caller(alice);
             assert_eq!(betting.submit_outcome(bet_number, 0).is_ok(), true);
             assert_eq!(
                 betting.get_bet_state(bet_number),
                 Ok(BetState::Bettor1Voted)
+            );
+
+            set_next_caller(alice);
+            assert_eq!(betting.withdraw_winnings(bet_number), Ok(true));
+            assert_eq!(betting.get_bet_state(bet_number), Ok(BetState::Concluded));
+            // Cannot withdraw winnings a 2nd time
+            assert_eq!(
+                betting.withdraw_winnings(bet_number),
+                Err(Error::AlreadyWithdrewWinnings)
             );
 
             set_next_caller(bob);
@@ -873,7 +902,7 @@ mod betting {
                 Ok(true)
             );
 
-            // Event ends: Alice wins!
+            // Event ends: bettors agree that conditions for winning turned out to be unclear!
             set_next_caller(alice);
             assert_eq!(betting.submit_outcome(bet_number, 3).is_ok(), true);
             assert_eq!(
@@ -908,7 +937,7 @@ mod betting {
                 Ok(true)
             );
 
-            // Event ends: Alice wins!
+            // Event ends: bettors disagree!
             set_next_caller(alice);
             assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
             assert_eq!(
@@ -946,7 +975,7 @@ mod betting {
                 Ok(true)
             );
 
-            // Event ends: Alice wins!
+            // Event ends: bettors disagree!
             set_next_caller(alice);
             assert_eq!(betting.submit_outcome(bet_number, 1).is_ok(), true);
             assert_eq!(
